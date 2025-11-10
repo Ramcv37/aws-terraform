@@ -1,15 +1,17 @@
- pipeline {
+pipeline {
   agent any
   options {
     timestamps()
-    ansiColor('xterm')
+    // use the generic wrap option with the AnsiColor build wrapper
+    wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm'])
   }
 
+  // We'll compute dynamic env values in a script (Declarative env doesn’t allow Groovy expressions)
   environment {
-    // Map branch -> environment dir + tfvars file
-    TARGET_ENV = "${env.BRANCH_NAME == 'main' ? 'prod' : (env.BRANCH_NAME == 'staging' ? 'staging' : 'dev')}"
-    ENV_DIR    = "envs/${env.TARGET_ENV}"
-    VAR_FILE   = "${env.TARGET_ENV}.tfvars"
+    // set sane defaults; we’ll overwrite in Checkout
+    TARGET_ENV = 'dev'
+    ENV_DIR    = 'envs/dev'
+    VAR_FILE   = 'dev.tfvars'
   }
 
   parameters {
@@ -23,6 +25,12 @@
       steps {
         checkout scm
         script {
+          // decide env from branch
+          def target = (env.BRANCH_NAME == 'main') ? 'prod' :
+                       (env.BRANCH_NAME == 'staging') ? 'staging' : 'dev'
+          env.TARGET_ENV = target
+          env.ENV_DIR    = "envs/${target}"
+          env.VAR_FILE   = "${target}.tfvars"
           echo "Branch: ${env.BRANCH_NAME}, Target env: ${env.TARGET_ENV}"
         }
       }
@@ -30,30 +38,14 @@
 
     stage('Set AWS Credentials') {
       steps {
-        script {
-          // --- Option A: direct access keys per env (Secret Text credentials) ---
-          withCredentials([
-            string(credentialsId: "aws_access_key_id_${env.TARGET_ENV}", variable: 'AWS_ACCESS_KEY_ID'),
-            string(credentialsId: "aws_secret_access_key_${env.TARGET_ENV}", variable: 'AWS_SECRET_ACCESS_KEY')
-          ]) {
+        withCredentials([
+          string(credentialsId: "aws_access_key_id_${env.TARGET_ENV}", variable: 'AWS_ACCESS_KEY_ID'),
+          string(credentialsId: "aws_secret_access_key_${env.TARGET_ENV}", variable: 'AWS_SECRET_ACCESS_KEY')
+        ]) {
+          // optional but nice: ensure region is set for CLI
+          withEnv(["AWS_DEFAULT_REGION=ap-south-1"]) {
             sh 'aws sts get-caller-identity || true'
           }
-
-          // --- Option B: AssumeRole (preferred) ---
-          // withCredentials([
-          //   string(credentialsId: "ci_aws_access_key_id",     variable: 'CI_AWS_ACCESS_KEY_ID'),
-          //   string(credentialsId: "ci_aws_secret_access_key", variable: 'CI_AWS_SECRET_ACCESS_KEY')
-          // ]) {
-          //   sh '''
-          //     export AWS_ACCESS_KEY_ID="$CI_AWS_ACCESS_KEY_ID"
-          //     export AWS_SECRET_ACCESS_KEY="$CI_AWS_SECRET_ACCESS_KEY"
-          //     CREDS=$(aws sts assume-role --role-arn arn:aws:iam::<ACCOUNT_ID>:role/terraform-${TARGET_ENV} --role-session-name jenkins-${TARGET_ENV} --duration-seconds 3600)
-          //     export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
-          //     export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
-          //     export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
-          //     aws sts get-caller-identity
-          //   '''
-          // }
         }
       }
     }
@@ -63,8 +55,7 @@
         dir("${ENV_DIR}") {
           sh '''
             terraform --version
-            terraform init -reconfigure \
-              -backend-config=backend.hcl
+            terraform init -reconfigure -backend-config=backend.hcl
           '''
         }
       }
@@ -101,9 +92,7 @@
 
   post {
     success {
-      script {
-        echo "✅ Deployment successful for ${env.TARGET_ENV}"
-      }
+      echo "✅ Deployment successful for ${env.TARGET_ENV}"
     }
     failure {
       script {
@@ -112,17 +101,15 @@
           echo "Running rollback mode: ${params.ROLLBACK_MODE}"
           try {
             if (params.ROLLBACK_MODE == 'last_successful_commit') {
-              // 1) Re-apply last green git revision
               def prev = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: ''
               if (prev?.trim()) {
                 dir('rollback-last-success') {
-                  // Check out that good commit into a temp dir
                   sh """
                     git clone ${env.GIT_URL} .
                     git checkout ${prev}
-                    cd ${ENV_DIR}
+                    cd ${env.ENV_DIR}
                     terraform init -reconfigure -backend-config=backend.hcl
-                    terraform plan -var-file=${VAR_FILE} -out=tfplan.rollback.bin
+                    terraform plan -var-file=${env.VAR_FILE} -out=tfplan.rollback.bin
                     terraform apply -auto-approve tfplan.rollback.bin
                   """
                 }
@@ -130,11 +117,10 @@
                 echo "No previous successful commit available; skipping redeploy."
               }
             } else if (params.ROLLBACK_MODE == 'destroy_partial') {
-              // 2) Tear down partially-created infra (use only for ephemeral stacks)
-              dir("${ENV_DIR}") {
+              dir("${env.ENV_DIR}") {
                 sh """
                   terraform init -reconfigure -backend-config=backend.hcl
-                  terraform destroy ${params.AUTO_APPROVE ? '-auto-approve' : ''} -var-file=${VAR_FILE}
+                  terraform destroy ${params.AUTO_APPROVE ? '-auto-approve' : ''} -var-file=${env.VAR_FILE}
                 """
               }
             }
@@ -147,16 +133,12 @@
       }
     }
     always {
-      script {
-        // Show some outputs if state exists
-        sh """
-          if [ -d "${ENV_DIR}" ]; then
-            cd ${ENV_DIR}
-            terraform output || true
-          fi
-        """
-      }
+      sh """
+        if [ -d "${env.ENV_DIR}" ]; then
+          cd ${env.ENV_DIR}
+          terraform output || true
+        fi
+      """
     }
   }
 }
-
