@@ -1,6 +1,4 @@
-# Jenkinsfile
-# CI/CD pipeline for multi-environment web app deployment
-  pipeline {
+ pipeline {
   agent any
   options {
     timestamps()
