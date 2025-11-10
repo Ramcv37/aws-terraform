@@ -1,49 +1,39 @@
 pipeline {
   agent any
-  options {
-    timestamps()
-    // use the generic wrap option with the AnsiColor build wrapper
-    wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm'])
-  }
-
-  // We'll compute dynamic env values in a script (Declarative env doesn’t allow Groovy expressions)
-  environment {
-    // set sane defaults; we’ll overwrite in Checkout
-    TARGET_ENV = 'dev'
-    ENV_DIR    = 'envs/dev'
-    VAR_FILE   = 'dev.tfvars'
-  }
+  options { timestamps() }
 
   parameters {
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve apply/destroy')
-    choice(name: 'ROLLBACK_MODE', choices: ['none','last_successful_commit','destroy_partial'], description: 'Rollback strategy after failures or on demand')
-    booleanParam(name: 'ROLLBACK_ON_FAILURE', defaultValue: true, description: 'If apply fails, run rollback action')
+    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve terraform apply')
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         checkout scm
         script {
-          // decide env from branch
-          def target = (env.BRANCH_NAME == 'main') ? 'prod' :
-                       (env.BRANCH_NAME == 'staging') ? 'staging' : 'dev'
+          // ✅ Map branch -> environment
+          def target = (env.BRANCH_NAME == 'master') ? 'prod'
+                    : (env.BRANCH_NAME == 'staging') ? 'staging'
+                    : 'dev'
+
           env.TARGET_ENV = target
           env.ENV_DIR    = "envs/${target}"
           env.VAR_FILE   = "${target}.tfvars"
-          echo "Branch: ${env.BRANCH_NAME}, Target env: ${env.TARGET_ENV}"
+
+          echo "Branch: ${env.BRANCH_NAME}"
+          echo "Deploying to Environment: ${env.TARGET_ENV}"
         }
       }
     }
 
-    stage('Set AWS Credentials') {
+    stage('AWS Credentials') {
       steps {
         withCredentials([
           string(credentialsId: "aws_access_key_id_${env.TARGET_ENV}", variable: 'AWS_ACCESS_KEY_ID'),
           string(credentialsId: "aws_secret_access_key_${env.TARGET_ENV}", variable: 'AWS_SECRET_ACCESS_KEY')
         ]) {
-          // optional but nice: ensure region is set for CLI
-          withEnv(["AWS_DEFAULT_REGION=ap-south-1"]) {
+          withEnv(['AWS_DEFAULT_REGION=ap-south-1']) {
             sh 'aws sts get-caller-identity || true'
           }
         }
@@ -52,7 +42,7 @@ pipeline {
 
     stage('Terraform Init') {
       steps {
-        dir("${ENV_DIR}") {
+        dir("${env.ENV_DIR}") {
           sh '''
             terraform --version
             terraform init -reconfigure -backend-config=backend.hcl
@@ -61,84 +51,32 @@ pipeline {
       }
     }
 
-    stage('Validate & Plan') {
+    stage('Terraform Plan') {
       steps {
-        dir("${ENV_DIR}") {
-          sh '''
-            terraform validate
-            terraform plan -var-file=${VAR_FILE} -out=tfplan.bin
-          '''
-        }
-      }
-      post {
-        success {
-          archiveArtifacts artifacts: "${ENV_DIR}/tfplan.bin", onlyIfSuccessful: true
+        dir("${env.ENV_DIR}") {
+          sh 'terraform validate'
+          sh 'terraform plan -var-file=${VAR_FILE} -out=tfplan.bin'
         }
       }
     }
 
-    stage('Apply') {
+    stage('Terraform Apply') {
       when { expression { return params.AUTO_APPROVE } }
       steps {
-        dir("${ENV_DIR}") {
-          sh '''
-            set -e
-            terraform apply -auto-approve tfplan.bin
-          '''
+        dir("${env.ENV_DIR}") {
+          sh 'terraform apply -auto-approve tfplan.bin'
         }
       }
     }
   }
 
   post {
-    success {
-      echo "✅ Deployment successful for ${env.TARGET_ENV}"
-    }
-    failure {
-      script {
-        echo "❌ Pipeline failed on ${env.TARGET_ENV}"
-        if (params.ROLLBACK_ON_FAILURE && params.ROLLBACK_MODE != 'none') {
-          echo "Running rollback mode: ${params.ROLLBACK_MODE}"
-          try {
-            if (params.ROLLBACK_MODE == 'last_successful_commit') {
-              def prev = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: ''
-              if (prev?.trim()) {
-                dir('rollback-last-success') {
-                  sh """
-                    git clone ${env.GIT_URL} .
-                    git checkout ${prev}
-                    cd ${env.ENV_DIR}
-                    terraform init -reconfigure -backend-config=backend.hcl
-                    terraform plan -var-file=${env.VAR_FILE} -out=tfplan.rollback.bin
-                    terraform apply -auto-approve tfplan.rollback.bin
-                  """
-                }
-              } else {
-                echo "No previous successful commit available; skipping redeploy."
-              }
-            } else if (params.ROLLBACK_MODE == 'destroy_partial') {
-              dir("${env.ENV_DIR}") {
-                sh """
-                  terraform init -reconfigure -backend-config=backend.hcl
-                  terraform destroy ${params.AUTO_APPROVE ? '-auto-approve' : ''} -var-file=${env.VAR_FILE}
-                """
-              }
-            }
-          } catch (err) {
-            echo "Rollback action encountered an error: ${err}"
-          }
-        } else {
-          echo "Rollback disabled or set to 'none'."
-        }
-      }
-    }
     always {
-      sh """
-        if [ -d "${env.ENV_DIR}" ]; then
-          cd ${env.ENV_DIR}
-          terraform output || true
+      sh '''
+        if [ -d "${ENV_DIR}" ]; then
+          cd "${ENV_DIR}" && terraform output || true
         fi
-      """
+      '''
     }
   }
 }
