@@ -11,30 +11,40 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
+
         script {
-          // ✅ Map branch -> environment
-          def target = (env.BRANCH_NAME == 'master') ? 'prod'
-                    : (env.BRANCH_NAME == 'staging') ? 'staging'
-                    : 'dev'
+          // Detect branch if BRANCH_NAME is null
+          def branch = env.BRANCH_NAME
+          if (!branch) {
+            branch = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
+          }
+          env.BRANCH_NAME = branch
 
-          env.TARGET_ENV = target
-          env.ENV_DIR    = "envs/${target}"
-          env.VAR_FILE   = "${target}.tfvars"
+          // Map branch to environment name
+          env.TARGET_ENV = (branch == 'master')  ? 'prod'
+                        : (branch == 'staging') ? 'staging'
+                        : 'dev'
 
-          echo "Branch: ${env.BRANCH_NAME}"
-          echo "Deploying to Environment: ${env.TARGET_ENV}"
+          // Folder and variable file locations
+          env.ENV_DIR  = "envs/${env.TARGET_ENV}"
+          env.VAR_FILE = "${env.TARGET_ENV}.tfvars"
+
+          echo "✔ Branch Detected: ${env.BRANCH_NAME}"
+          echo "✔ Deploying to Environment: ${env.TARGET_ENV}"
+          echo "✔ Environment Directory: ${env.ENV_DIR}"
         }
       }
     }
 
     stage('AWS Credentials') {
       steps {
-        withCredentials([
-          string(credentialsId: "aws_access_key_id_${env.TARGET_ENV}", variable: 'AWS_ACCESS_KEY_ID'),
-          string(credentialsId: "aws_secret_access_key_${env.TARGET_ENV}", variable: 'AWS_SECRET_ACCESS_KEY')
-        ]) {
-          withEnv(['AWS_DEFAULT_REGION=ap-south-1']) {
-            sh 'aws sts get-caller-identity || true'
+        script {
+          // Dynamic Credential ID based on env (dev only for now)
+          def cred = "aws-dev-iam"
+          echo "🔑 Using AWS Credential: ${cred}"
+
+          withAWS(credentials: cred, region: 'ap-south-1') {
+            sh 'aws sts get-caller-identity'
           }
         }
       }
@@ -44,6 +54,7 @@ pipeline {
       steps {
         dir("${env.ENV_DIR}") {
           sh '''
+            set -e
             terraform --version
             terraform init -reconfigure -backend-config=backend.hcl
           '''
@@ -54,8 +65,11 @@ pipeline {
     stage('Terraform Plan') {
       steps {
         dir("${env.ENV_DIR}") {
-          sh 'terraform validate'
-          sh 'terraform plan -var-file=${VAR_FILE} -out=tfplan.bin'
+          sh '''
+            set -e
+            terraform validate
+          '''
+          sh 'terraform plan -var-file="${VAR_FILE}" -out=tfplan.bin'
         }
       }
     }
