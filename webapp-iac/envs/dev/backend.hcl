@@ -1,7 +1,5 @@
-bucket         = "tfstate-webapp-dev"          # create once
+bucket         = "tfstate-webapp-dev"
 key            = "envs/dev/terraform.tfstate"
 region         = "ap-south-1"
-dynamodb_table = "tf-locks"                    # create once for all envs
+dynamodb_table = "tf-locks"
 encrypt        = true
-# backend.hcl
-# Backend configuration for dev environment (S3 + DynamoDB)
