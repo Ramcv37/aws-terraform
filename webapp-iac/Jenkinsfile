@@ -13,25 +13,21 @@ pipeline {
         checkout scm
 
         script {
-          // Detect branch if BRANCH_NAME is null
-          def branch = env.BRANCH_NAME
-          if (!branch) {
-            branch = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
-          }
+          // Determine branch
+          def branch = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
           env.BRANCH_NAME = branch
 
-          // Map branch to environment name
+          // Map to env
           env.TARGET_ENV = (branch == 'master')  ? 'prod'
                         : (branch == 'staging') ? 'staging'
                         : 'dev'
 
-          // Folder and variable file locations
           env.ENV_DIR  = "webapp-iac/envs/${env.TARGET_ENV}"
           env.VAR_FILE = "${env.TARGET_ENV}.tfvars"
 
-          echo "✔ Branch Detected: ${env.BRANCH_NAME}"
-          echo "✔ Deploying to Environment: ${env.TARGET_ENV}"
-          echo "✔ Environment Directory: ${env.ENV_DIR}"
+          echo "✔ Branch Detected: ${BRANCH_NAME}"
+          echo "✔ Deploying to Environment: ${TARGET_ENV}"
+          echo "✔ Environment Directory: ${ENV_DIR}"
         }
       }
     }
@@ -39,7 +35,7 @@ pipeline {
     stage('AWS Credentials') {
       steps {
         script {
-          // Dynamic Credential ID based on env (dev only for now)
+          // Using a single credential for now
           def cred = "aws-dev-iam"
           echo "🔑 Using AWS Credential: ${cred}"
 
@@ -56,7 +52,7 @@ pipeline {
           sh '''
             set -e
             terraform --version
-            terraform init -reconfigure -backend-config=backend.hcl
+            terraform init -reconfigure
           '''
         }
       }
@@ -69,7 +65,7 @@ pipeline {
             set -e
             terraform validate
           '''
-          sh 'terraform plan -var-file="${VAR_FILE}" -out=tfplan.bin'
+          sh "terraform plan -var-file=${VAR_FILE} -out=tfplan.bin"
         }
       }
     }
@@ -86,11 +82,13 @@ pipeline {
 
   post {
     always {
-      sh '''
-        if [ -d "${ENV_DIR}" ]; then
-          cd "${ENV_DIR}" && terraform output || true
-        fi
-      '''
+      script {
+        sh '''
+          if [ -d "${ENV_DIR}" ]; then
+            cd "${ENV_DIR}" && terraform output || true
+          fi
+        '''
+      }
     }
   }
 }
