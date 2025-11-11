@@ -3,48 +3,53 @@ pipeline {
   options { timestamps() }
 
   parameters {
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve terraform apply')
+    choice(
+      name: 'TARGET_ENV',
+      choices: ['dev', 'staging', 'prod'],
+      description: 'Select environment to deploy'
+    )
+    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto approve Terraform apply')
+  }
+
+  environment {
+    AWS_REGION = "ap-south-1"
+    AWS_CRED   = "aws-dev-iam"   // Using same IAM for demo
   }
 
   stages {
 
-    stage('Checkout') {
+    stage("Checkout") {
+      steps { checkout scm }
+    }
+
+    stage("Show Environment Selection") {
       steps {
-        checkout scm
-
         script {
-          def branch = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
-          env.BRANCH_NAME = branch
-
-          env.TARGET_ENV = (branch == 'master') ? 'prod' :
-                           (branch == 'staging') ? 'staging' : 'dev'
-
-          env.ENV_DIR  = "webapp-iac/envs/${env.TARGET_ENV}"
-          env.VAR_FILE = "${env.TARGET_ENV}.tfvars"
-
-          echo "✔ Branch Detected: ${env.BRANCH_NAME}"
-          echo "✔ Deploying to Environment: ${env.TARGET_ENV}"
-          echo "✔ Environment Directory: ${env.ENV_DIR}"
+          echo """
+          ✅ Selected Environment: ${params.TARGET_ENV}
+          📂 Directory: webapp-iac/envs/${params.TARGET_ENV}
+          🧾 Var File: ${params.TARGET_ENV}.tfvars
+          """
         }
       }
     }
 
-    stage('Terraform (Init + Plan + Apply) with AWS') {
+    stage("Terraform Init + Plan + Apply") {
       steps {
-        script {
-          withAWS(credentials: "aws-dev-iam", region: "ap-south-1") {
+        withAWS(region: AWS_REGION, credentials: AWS_CRED) {
+          dir("webapp-iac/envs/${params.TARGET_ENV}") {
 
-            dir("${env.ENV_DIR}") {
+            sh """
+              terraform init
+              terraform validate
+              terraform plan -var-file=${params.TARGET_ENV}.tfvars -out=tfplan.bin
+            """
 
-              sh """
-                set -e
-                terraform init -reconfigure
-                terraform validate
-                terraform plan -var-file=${env.VAR_FILE} -out=tfplan.bin
-              """
-
+            script {
               if (params.AUTO_APPROVE) {
-                sh 'terraform apply -auto-approve tfplan.bin'
+                sh "terraform apply -auto-approve tfplan.bin"
+              } else {
+                sh "terraform apply tfplan.bin"
               }
             }
           }
@@ -57,9 +62,7 @@ pipeline {
     always {
       script {
         sh """
-          if [ -d "${env.ENV_DIR}" ]; then
-            cd ${env.ENV_DIR} && terraform output || true
-          fi
+        cd webapp-iac/envs/${params.TARGET_ENV} && terraform output || true
         """
       }
     }
