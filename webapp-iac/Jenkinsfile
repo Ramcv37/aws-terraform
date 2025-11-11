@@ -13,68 +13,41 @@ pipeline {
         checkout scm
 
         script {
-          // Determine branch
           def branch = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
           env.BRANCH_NAME = branch
 
-          // Map to env
-          env.TARGET_ENV = (branch == 'master')  ? 'prod'
-                        : (branch == 'staging') ? 'staging'
-                        : 'dev'
+          env.TARGET_ENV = (branch == 'master') ? 'prod' :
+                           (branch == 'staging') ? 'staging' : 'dev'
 
           env.ENV_DIR  = "webapp-iac/envs/${env.TARGET_ENV}"
           env.VAR_FILE = "${env.TARGET_ENV}.tfvars"
 
-          echo "✔ Branch Detected: ${BRANCH_NAME}"
-          echo "✔ Deploying to Environment: ${TARGET_ENV}"
-          echo "✔ Environment Directory: ${ENV_DIR}"
+          echo "✔ Branch Detected: ${env.BRANCH_NAME}"
+          echo "✔ Deploying to Environment: ${env.TARGET_ENV}"
+          echo "✔ Environment Directory: ${env.ENV_DIR}"
         }
       }
     }
 
-    stage('AWS Credentials') {
+    stage('Terraform (Init + Plan + Apply) with AWS') {
       steps {
         script {
-          // Using a single credential for now
-          def cred = "aws-dev-iam"
-          echo "🔑 Using AWS Credential: ${cred}"
+          withAWS(credentials: "aws-dev-iam", region: "ap-south-1") {
 
-          withAWS(credentials: cred, region: 'ap-south-1') {
-            sh 'aws sts get-caller-identity'
+            dir("${env.ENV_DIR}") {
+
+              sh """
+                set -e
+                terraform init -reconfigure
+                terraform validate
+                terraform plan -var-file=${env.VAR_FILE} -out=tfplan.bin
+              """
+
+              if (params.AUTO_APPROVE) {
+                sh 'terraform apply -auto-approve tfplan.bin'
+              }
+            }
           }
-        }
-      }
-    }
-
-    stage('Terraform Init') {
-      steps {
-        dir("${env.ENV_DIR}") {
-          sh '''
-            set -e
-            terraform --version
-            terraform init -reconfigure
-          '''
-        }
-      }
-    }
-
-    stage('Terraform Plan') {
-      steps {
-        dir("${env.ENV_DIR}") {
-          sh '''
-            set -e
-            terraform validate
-          '''
-          sh "terraform plan -var-file=${VAR_FILE} -out=tfplan.bin"
-        }
-      }
-    }
-
-    stage('Terraform Apply') {
-      when { expression { return params.AUTO_APPROVE } }
-      steps {
-        dir("${env.ENV_DIR}") {
-          sh 'terraform apply -auto-approve tfplan.bin'
         }
       }
     }
@@ -83,11 +56,11 @@ pipeline {
   post {
     always {
       script {
-        sh '''
-          if [ -d "${ENV_DIR}" ]; then
-            cd "${ENV_DIR}" && terraform output || true
+        sh """
+          if [ -d "${env.ENV_DIR}" ]; then
+            cd ${env.ENV_DIR} && terraform output || true
           fi
-        '''
+        """
       }
     }
   }
