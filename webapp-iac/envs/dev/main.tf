@@ -1,8 +1,9 @@
-module "web_app" {
+module "web" {
   source           = "../../modules/web_app"
   project          = "webapp"
   environment      = "dev"
   owner            = "platform"
+
   region           = var.region
   vpc_id           = var.vpc_id
   public_subnet_id = var.public_subnet_id
@@ -12,5 +13,5 @@ module "web_app" {
 }
 
 output "web_public_ip" {
-  value = module.web_app.web_public_ip
+  value = module.web.web_public_ip
 }
