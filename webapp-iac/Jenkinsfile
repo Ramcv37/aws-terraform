@@ -3,33 +3,37 @@ pipeline {
   options { timestamps() }
 
   parameters {
-    choice(name: 'TARGET_ENV', choices: ['dev', 'staging', 'prod'], description: 'Select environment')
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto approve Terraform apply')
+    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Select APPLY or DESTROY')
+    choice(name: 'TARGET_ENV', choices: ['dev', 'staging', 'prod'], description: 'Select Environment')
   }
 
   environment {
     AWS_REGION = "ap-south-1"
-    AWS_CRED   = "aws-dev-iam"   // same IAM for all envs
   }
 
   stages {
 
-    stage('Checkout') { steps { checkout scm } }
-
-    stage('Show Environment Selection') {
+    stage('Checkout') {
       steps {
-        echo """
-        ✅ Selected Environment: ${params.TARGET_ENV}
-        📂 Directory: webapp-iac/envs/${params.TARGET_ENV}
-        🧾 Var File: ${params.TARGET_ENV}.tfvars
-        """
+        checkout scm
+        script {
+          env.ENV_DIR  = "webapp-iac/envs/${params.TARGET_ENV}"
+          env.VAR_FILE = "${params.TARGET_ENV}.tfvars"
+
+          echo """
+          ✅ Target Env: ${params.TARGET_ENV}
+          📂 Directory:   ${env.ENV_DIR}
+          🧾 Var File:    ${env.VAR_FILE}
+          🔧 Action:      ${params.ACTION}
+          """
+        }
       }
     }
 
     stage('Terraform Init + Validate') {
       steps {
-        withAWS(region: AWS_REGION, credentials: AWS_CRED) {
-          dir("webapp-iac/envs/${params.TARGET_ENV}") {
+        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
+          dir("${env.ENV_DIR}") {
             sh """
               set -e
               terraform init
@@ -40,67 +44,47 @@ pipeline {
       }
     }
 
-    // 🔧 NEW: If SG exists in AWS but not in state, import it so apply won’t fail
-    stage('Import existing SG if present') {
+    stage('Terraform Plan') {
+      when {
+        expression { params.ACTION == 'APPLY' }
+      }
       steps {
-        withAWS(region: AWS_REGION, credentials: AWS_CRED) {
-          dir("webapp-iac/envs/${params.TARGET_ENV}") {
-            sh '''
-              set -e
-
-              TFVARS="${TARGET_ENV}.tfvars"
-
-              # Extract values from tfvars (simple parser assumes key = "value")
-              vpc_id=$(awk -F= '/^\\s*vpc_id\\s*=/{gsub(/[" ]/,"",$2);print $2}' "$TFVARS")
-              project=$(awk -F= '/^\\s*project\\s*=/{gsub(/[" ]/,"",$2);print $2}' "$TFVARS")
-
-              # env is the chosen TARGET_ENV
-              env_name="${TARGET_ENV}"
-
-              # Resource address in your module
-              tf_addr='module.web.aws_security_group.web'
-
-              # Desired SG name from module code
-              sg_name="${project}-${env_name}-web-sg"
-
-              echo "Looking for existing SG named ${sg_name} in VPC ${vpc_id}..."
-
-              # Find existing SG ID (if any)
-              sg_id=$(aws ec2 describe-security-groups \
-                --filters "Name=group-name,Values=${sg_name}" "Name=vpc-id,Values=${vpc_id}" \
-                --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
-
-              # If an SG exists and Terraform does NOT already know it, import it
-              if [ "$sg_id" != "None" ] && [ -n "$sg_id" ]; then
-                echo "Found existing SG: $sg_id"
-
-                # Check if already in state
-                if ! terraform state show "$tf_addr" >/dev/null 2>&1; then
-                  echo "Importing $tf_addr => $sg_id"
-                  terraform import "$tf_addr" "$sg_id"
-                else
-                  echo "SG already present in state; skipping import."
-                fi
-              else
-                echo "No pre-existing SG found; continue normally."
-              fi
-            '''
+        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
+          dir("${env.ENV_DIR}") {
+            sh """
+              terraform plan -var-file=${env.VAR_FILE} -out=tfplan.bin
+            """
           }
         }
       }
     }
 
-    stage('Plan + Apply') {
+    stage('Approve Destroy (Safety Check)') {
+      when {
+        expression { params.ACTION == 'DESTROY' }
+      }
       steps {
-        withAWS(region: AWS_REGION, credentials: AWS_CRED) {
-          dir("webapp-iac/envs/${params.TARGET_ENV}") {
-            sh """
-              set -e
-              terraform plan -var-file=${params.TARGET_ENV}.tfvars -out=tfplan.bin
-            """
+        timeout(time: 1, unit: 'MINUTES') {
+          input message: """
+⚠️ WARNING: You are about to DESTROY resources in ${params.TARGET_ENV}!
+This action is irreversible.
+
+Press PROCEED to continue or ABORT.
+          """
+        }
+      }
+    }
+
+    stage('Apply / Destroy') {
+      steps {
+        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
+          dir("${env.ENV_DIR}") {
             script {
-              sh params.AUTO_APPROVE ? "terraform apply -auto-approve tfplan.bin"
-                                     : "terraform apply tfplan.bin"
+              if (params.ACTION == 'APPLY') {
+                sh 'terraform apply -auto-approve tfplan.bin'
+              } else {
+                sh "terraform destroy -auto-approve -var-file=${env.VAR_FILE}"
+              }
             }
           }
         }
@@ -110,8 +94,12 @@ pipeline {
 
   post {
     always {
-      dir("webapp-iac/envs/${params.TARGET_ENV}") {
-        sh 'terraform output || true'
+      script {
+        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
+          dir("${env.ENV_DIR}") {
+            sh "terraform output || true"
+          }
+        }
       }
     }
   }
