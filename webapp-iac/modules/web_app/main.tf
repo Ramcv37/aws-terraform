@@ -1,80 +1,72 @@
-pipeline {
-  agent any
-  options { timestamps() }
+terraform {
+  required_version = ">= 1.6.0"
 
-  parameters {
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve terraform apply')
-  }
-
-  stages {
-
-    stage('Checkout') {
-      steps {
-        checkout scm
-
-        script {
-          def branch = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
-          env.BRANCH_NAME = branch
-
-          env.TARGET_ENV = (branch == 'master')  ? 'prod'
-                        : (branch == 'staging') ? 'staging'
-                        : 'dev'
-
-          env.ENV_DIR  = "webapp-iac/envs/${env.TARGET_ENV}"
-          env.VAR_FILE = "${env.TARGET_ENV}.tfvars"
-
-          echo "✔ Branch: ${env.BRANCH_NAME}"
-          echo "✔ Deploying to: ${env.TARGET_ENV}"
-          echo "✔ Env Path: ${env.ENV_DIR}"
-        }
-      }
-    }
-
-    stage('Terraform Init & Plan') {
-      steps {
-        script {
-          def cred = "aws-dev-iam"
-          echo "🔑 Using AWS Credential: ${cred}"
-
-          withAWS(credentials: cred, region: 'ap-south-1') {
-            dir("${env.ENV_DIR}") {
-
-              sh '''
-                set -e
-                terraform --version
-                terraform init -reconfigure        # ✅ local backend (no backend.hcl)
-                terraform validate
-              '''
-
-              sh "terraform plan -var-file=${env.VAR_FILE} -out=tfplan.bin"
-            }
-          }
-        }
-      }
-    }
-
-    stage('Terraform Apply') {
-      when { expression { return params.AUTO_APPROVE } }
-      steps {
-        script {
-          def cred = "aws-dev-iam"
-          withAWS(credentials: cred, region: 'ap-south-1') {
-            dir("${env.ENV_DIR}") {
-              sh "terraform apply -auto-approve tfplan.bin"
-            }
-          }
-        }
-      }
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
     }
   }
+}
 
-  post {
-    always {
-      script {
-        dir("${env.ENV_DIR}") {
-          sh "terraform output || true"
-        }
-      }
-    }
+locals {
+  tags = merge({
+    project     = var.project
+    environment = var.environment
+    owner       = var.owner
+  }, var.extra_tags)
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
+}
+
+resource "aws_security_group" "web" {
+  name        = "${var.project}-${var.environment}-web-sg"
+  description = "Allow HTTP/SSH"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.ssh_cidr_blocks
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.tags
+}
+
+resource "aws_instance" "web" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.instance_type
+  subnet_id              = var.public_subnet_id
+  vpc_security_group_ids = [aws_security_group.web.id]
+
+  tags = merge(local.tags, {
+    Name = "${var.project}-${var.environment}-web"
+  })
+}
+
+output "web_public_ip" {
+  value = aws_instance.web.public_ip
 }
