@@ -1,5 +1,6 @@
 terraform {
   required_version = ">= 1.6.0"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -16,13 +17,12 @@ locals {
   }, var.extra_tags)
 }
 
-provider "aws" {
-  region = var.region
-}
+# ✅ REMOVED provider "aws" block here (so Jenkins credentials pass correctly)
 
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"]
+  owners      = ["099720109477"] # Canonical
+
   filter {
     name   = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
@@ -64,7 +64,9 @@ resource "aws_instance" "web" {
   subnet_id              = var.public_subnet_id
   vpc_security_group_ids = [aws_security_group.web.id]
 
-  tags = merge(local.tags, { Name = "${var.project}-${var.environment}-web" })
+  tags = merge(local.tags, {
+    Name = "${var.project}-${var.environment}-web"
+  })
 }
 
 output "web_public_ip" {
