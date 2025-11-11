@@ -1,3 +1,4 @@
+region          = "ap-south-1"
 project         = "webapp"
 environment     = "staging"
 owner           = "platform"
