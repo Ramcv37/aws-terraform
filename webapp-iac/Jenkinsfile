@@ -1,39 +1,35 @@
 pipeline {
   agent any
-  options { timestamps() }
 
   parameters {
-    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Select APPLY or DESTROY')
-    choice(name: 'TARGET_ENV', choices: ['dev', 'staging', 'prod'], description: 'Select Environment')
+    choice(name: 'TARGET_ENV', choices: ['dev', 'staging', 'prod'], description: 'Which environment to deploy?')
+    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Terraform Action')
   }
 
   environment {
     AWS_REGION = "ap-south-1"
+    AWS_CREDS  = "aws-dev-iam"        // your Jenkins AWS credential
+    ENV_DIR    = "webapp-iac/envs/${params.TARGET_ENV}"
+    VAR_FILE   = "${params.TARGET_ENV}.tfvars"
   }
 
   stages {
 
-    stage('Checkout') {
+    stage('Show Selection') {
       steps {
-        checkout scm
-        script {
-          env.ENV_DIR  = "webapp-iac/envs/${params.TARGET_ENV}"
-          env.VAR_FILE = "${params.TARGET_ENV}.tfvars"
-
-          echo """
-          ✅ Target Env: ${params.TARGET_ENV}
-          📂 Directory:   ${env.ENV_DIR}
-          🧾 Var File:    ${env.VAR_FILE}
-          🔧 Action:      ${params.ACTION}
-          """
-        }
+        echo """
+        ✅ Environment : ${params.TARGET_ENV}
+        🔧 Action      : ${params.ACTION}
+        📂 Directory   : ${ENV_DIR}
+        🧾 Var File    : ${VAR_FILE}
+        """
       }
     }
 
     stage('Terraform Init + Validate') {
       steps {
-        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
-          dir("${env.ENV_DIR}") {
+        withAWS(credentials: AWS_CREDS, region: AWS_REGION) {
+          dir("${ENV_DIR}") {
             sh """
               set -e
               terraform init
@@ -44,46 +40,59 @@ pipeline {
       }
     }
 
-    stage('Terraform Plan') {
-      when {
-        expression { params.ACTION == 'APPLY' }
-      }
+    stage('Import Existing SG (avoid duplicate SG error)') {
       steps {
-        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
-          dir("${env.ENV_DIR}") {
-            sh """
-              terraform plan -var-file=${env.VAR_FILE} -out=tfplan.bin
-            """
+        withAWS(credentials: AWS_CREDS, region: AWS_REGION) {
+          dir("${ENV_DIR}") {
+            script {
+              def sgName = "webapp-${params.TARGET_ENV}-web-sg"
+              sh """
+                set -e
+                echo "🔎 Checking for existing SG: ${sgName}"
+                EXISTING_SG_ID=\$(aws ec2 describe-security-groups \
+                  --filters Name=group-name,Values=${sgName} \
+                  --query 'SecurityGroups[0].GroupId' \
+                  --output text 2>/dev/null || true)
+
+                if [ "\$EXISTING_SG_ID" != "None" ] && [ -n "\$EXISTING_SG_ID" ]; then
+                  echo "✅ Importing SG into Terraform: \$EXISTING_SG_ID"
+                  terraform import -input=false 'module.web.aws_security_group.web' "\$EXISTING_SG_ID" || true
+                else
+                  echo "ℹ No existing SG found. Continue."
+                fi
+              """
+            }
           }
         }
       }
     }
 
-    stage('Approve Destroy (Safety Check)') {
-      when {
-        expression { params.ACTION == 'DESTROY' }
-      }
+    stage('Terraform Plan') {
       steps {
-        timeout(time: 1, unit: 'MINUTES') {
-          input message: """
-⚠️ WARNING: You are about to DESTROY resources in ${params.TARGET_ENV}!
-This action is irreversible.
-
-Press PROCEED to continue or ABORT.
-          """
+        withAWS(credentials: AWS_CREDS, region: AWS_REGION) {
+          dir("${ENV_DIR}") {
+            sh "terraform plan -var-file=${VAR_FILE} -out=tfplan.bin"
+          }
         }
+      }
+    }
+
+    stage('Approval for Destroy (Safety Gate)') {
+      when { expression { params.ACTION == "DESTROY" } }
+      steps {
+        input message: "⚠ CONFIRM DESTROY for ${params.TARGET_ENV}? This will DELETE resources."
       }
     }
 
     stage('Apply / Destroy') {
       steps {
-        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
-          dir("${env.ENV_DIR}") {
+        withAWS(credentials: AWS_CREDS, region: AWS_REGION) {
+          dir("${ENV_DIR}") {
             script {
-              if (params.ACTION == 'APPLY') {
-                sh 'terraform apply -auto-approve tfplan.bin'
+              if (params.ACTION == "APPLY") {
+                sh "terraform apply -auto-approve tfplan.bin"
               } else {
-                sh "terraform destroy -auto-approve -var-file=${env.VAR_FILE}"
+                sh "terraform destroy -auto-approve -var-file=${VAR_FILE}"
               }
             }
           }
@@ -94,13 +103,7 @@ Press PROCEED to continue or ABORT.
 
   post {
     always {
-      script {
-        withAWS(credentials: 'aws-dev-iam', region: "${AWS_REGION}") {
-          dir("${env.ENV_DIR}") {
-            sh "terraform output || true"
-          }
-        }
-      }
+      echo "✅ Pipeline finished."
     }
   }
 }
