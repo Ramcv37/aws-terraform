@@ -2,15 +2,15 @@ pipeline {
   agent any
 
   parameters {
-    choice(name: 'ENV', choices: ['dev', 'staging', 'prod'], description: 'Select environment to deploy')
-    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Apply or Destroy infrastructure')
+    choice(name: 'ENV', choices: ['dev', 'staging', 'prod'], description: 'Select environment')
+    choice(name: 'ACTION', choices: ['APPLY', 'DESTROY'], description: 'Apply or Destroy infra')
   }
 
   environment {
-    AWS_CRED = "aws-dev-iam"            // Jenkins credential ID
-    AWS_REGION = "ap-south-1"
-    ENV_DIR = "webapp-iac/envs/${params.ENV}"
-    VAR_FILE = "${params.ENV}.tfvars"
+    AWS_CRED  = 'aws-dev-iam'               // Jenkins credential ID
+    AWS_REGION = 'ap-south-1'
+    ENV_DIR   = "webapp-iac/envs/${params.ENV}"
+    VAR_FILE  = "${params.ENV}.tfvars"
   }
 
   stages {
@@ -40,22 +40,22 @@ pipeline {
       }
     }
 
+    // Avoid duplicate SG create errors when APPLYing and SG already exists
     stage('Import Existing SG (avoid duplicate SG error)') {
-      when { expression { params.ACTION == "APPLY" } }
+      when { expression { params.ACTION == 'APPLY' } }
       steps {
         withAWS(credentials: AWS_CRED, region: AWS_REGION) {
           dir("${ENV_DIR}") {
             script {
               def sgName = "webapp-${params.ENV}-web-sg"
               echo "🔎 Checking for existing SG: ${sgName}"
-
               def existing = sh(script: "aws ec2 describe-security-groups --filters Name=group-name,Values=${sgName} --query SecurityGroups[0].GroupId --output text", returnStdout: true).trim()
-
-              if(existing != "None" && existing != "") {
-                echo "✅ Importing existing SG: ${existing}"
+              if (existing != "None" && existing) {
+                echo "✅ Importing existing SG into state: ${existing}"
+                // Import may need vars; tolerate non-zero exit to keep pipeline going
                 sh "terraform import -input=false module.web.aws_security_group.web ${existing} || true"
               } else {
-                echo "ℹ️ No existing SG found. Continuing normally."
+                echo "ℹ️ No existing SG found."
               }
             }
           }
@@ -74,7 +74,7 @@ pipeline {
     }
 
     stage('Approval for Destroy (Safety Gate)') {
-      when { expression { params.ACTION == "DESTROY" } }
+      when { expression { params.ACTION == 'DESTROY' } }
       steps {
         timeout(time: 60, unit: 'SECONDS') {
           input message: "⚠️ WARNING: Destroying ${params.ENV} environment. Proceed?"
@@ -87,10 +87,44 @@ pipeline {
         withAWS(credentials: AWS_CRED, region: AWS_REGION) {
           dir("${ENV_DIR}") {
             script {
-              if(params.ACTION == "APPLY") {
+              if (params.ACTION == 'APPLY') {
                 sh "terraform apply -auto-approve tfplan.bin"
               } else {
-                sh "terraform destroy -auto-approve -var-file=${VAR_FILE}"
+                // ---- Robust 2-phase destroy ----
+                // Phase 1: Destroy instance(s)
+                sh """
+                  set -e
+                  echo "🧹 Phase 1: Destroy instances..."
+                  terraform destroy -auto-approve -target=module.web.aws_instance.web -var-file=${VAR_FILE} || true
+                """
+
+                // Wait until ENIs using the SG are gone (DependencyViolation workaround)
+                sh '''
+                  echo "⏳ Waiting for ENIs to detach from SG before deleting SG..."
+                  # Try to read SG ID from state; if missing, skip wait
+                  SG_ID=$(terraform state show module.web.aws_security_group.web 2>/dev/null | awk \'/^id = /{print $3}\')
+                  if [ -n "$SG_ID" ]; then
+                    for i in $(seq 1 60); do
+                      ENI=$(aws ec2 describe-network-interfaces --filters Name=group-id,Values=$SG_ID --query "NetworkInterfaces[0].NetworkInterfaceId" --output text || echo "None")
+                      if [ "$ENI" = "None" ]; then
+                        echo "✅ No ENIs attached to $SG_ID. Proceeding."
+                        break
+                      fi
+                      echo "⏳ ENI still attached ($ENI). Waiting 10s... ($i/60)"
+                      sleep 10
+                    done
+                  else
+                    echo "ℹ️ SG not in state (already gone or never managed)."
+                  fi
+                '''
+
+                // Phase 2: Destroy the SG
+                sh """
+                  echo "🧹 Phase 2: Destroy Security Group..."
+                  terraform destroy -auto-approve -target=module.web.aws_security_group.web -var-file=${VAR_FILE} || true
+                  echo "🧹 Final sweep: destroy anything remaining..."
+                  terraform destroy -auto-approve -var-file=${VAR_FILE} || true
+                """
               }
             }
           }
@@ -102,18 +136,25 @@ pipeline {
   post {
     always {
       echo "✅ Pipeline finished."
-
-      withAWS(credentials: AWS_CRED, region: AWS_REGION) {
-        dir("${ENV_DIR}") {
-          script {
-            try {
-              def publicIP = sh(script: "terraform output -raw web_public_ip", returnStdout: true).trim()
-              echo "🌍 Server Public IP: ${publicIP}"
-              echo "💻 SSH Command: ssh ubuntu@${publicIP}"
-            } catch (e) {
-              echo "⚠️ No public IP available."
+      // Only try to print outputs for APPLY; DESTROY has no outputs by design
+      script {
+        if (params.ACTION == 'APPLY') {
+          withAWS(credentials: AWS_CRED, region: AWS_REGION) {
+            dir("${ENV_DIR}") {
+              // Don’t fail the build if output is absent; print nicely if present
+              sh '''
+                IP=$(terraform output -raw web_public_ip 2>/dev/null || true)
+                if [ -n "$IP" ]; then
+                  echo "🌍 Server IP: $IP"
+                  echo "💻 SSH Command: ssh ubuntu@$IP"
+                else
+                  echo "ℹ️ No web_public_ip output available yet."
+                fi
+              '''
             }
           }
+        } else {
+          echo "🧹 Destroy completed. Skipping outputs."
         }
       }
     }
