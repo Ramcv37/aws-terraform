@@ -1,4 +1,4 @@
-project          = "webapp"
+project          = "webapp1"
 environment      = "dev"
 owner            = "raji"
 
