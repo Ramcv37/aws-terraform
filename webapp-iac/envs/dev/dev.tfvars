@@ -13,3 +13,7 @@ ssh_cidr_blocks = ["132.237.185.251/32"]  # Your laptop IP
 extra_tags = {
   app = "demo"
 }
+
+# new additions
+app_name = "Dell Moogsoft"
+app_port = 8080
