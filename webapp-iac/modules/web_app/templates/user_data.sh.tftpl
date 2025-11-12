@@ -1,0 +1,65 @@
+#!/bin/bash
+set -e
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Update and install nginx
+apt-get update -y
+apt-get install -y nginx
+
+# Write the app page
+cat >/var/www/html/index.html <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Welcome Dell Moogsoft — ${env_upper}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial; 
+           background: #0b1b2b; color: #fff; margin: 0; display:flex; align-items:center; justify-content:center; height:100vh; }
+    .card{ background:#13283c; padding:40px 56px; border-radius:18px; box-shadow:0 8px 24px rgba(0,0,0,.35); text-align:center;}
+    h1{ margin:0 0 10px; font-size:32px; }
+    .pill{display:inline-block; padding:6px 12px; border-radius:999px; background:#0ea5e9; color:#00111f; font-weight:700; letter-spacing:.5px}
+    .env-dev{background:#f59e0b}
+    .env-staging{background:#a78bfa}
+    .env-prod{background:#22c55e}
+    p{opacity:.9; margin:10px 0 0}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Welcome Dell Moogsoft</h1>
+    <div class="pill env-${env_lower}">${env_upper}</div>
+    <p>App: ${app_name}</p>
+  </div>
+</body>
+</html>
+HTML
+
+# Configure nginx to listen on the requested port
+PORT="${port}"
+
+if [ "$PORT" = "80" ]; then
+  # Use the default site on port 80
+  sed -i 's/listen 80 default_server;/listen 80 default_server;/g' /etc/nginx/sites-available/default
+else
+  # Create a dedicated server block for custom port
+  cat >/etc/nginx/sites-available/webapp <<NGINX
+server {
+    listen ${PORT} default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html;
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+NGINX
+  ln -sf /etc/nginx/sites-available/webapp /etc/nginx/sites-enabled/webapp
+  # Disable the default 80 site if present
+  rm -f /etc/nginx/sites-enabled/default || true
+fi
+
+systemctl enable nginx
+systemctl restart nginx
