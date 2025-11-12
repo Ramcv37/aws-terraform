@@ -24,7 +24,7 @@ locals {
 # ────────────────────────────────
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical official account
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
@@ -40,7 +40,7 @@ resource "aws_security_group" "web" {
   description = "Allow WebApp Port and SSH"
   vpc_id      = var.vpc_id
 
-  # Allow HTTP / custom app port
+  # App port (dev/staging can be 808x, prod 80)
   ingress {
     from_port   = var.app_port
     to_port     = var.app_port
@@ -48,7 +48,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Allow SSH
+  # SSH
   ingress {
     from_port   = 22
     to_port     = 22
@@ -56,7 +56,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = var.ssh_cidr_blocks
   }
 
-  # Allow all egress
+  # Egress all
   egress {
     from_port   = 0
     to_port     = 0
@@ -79,7 +79,7 @@ locals {
     apt-get update -y
     apt-get install -y nginx
 
-    # Replace default HTML with environment-specific message
+    # Write the landing page
     cat >/var/www/html/index.html <<HTML
     <!DOCTYPE html>
     <html lang="en">
@@ -109,11 +109,11 @@ locals {
     if [ "$PORT" != "80" ]; then
       cat >/etc/nginx/sites-available/webapp <<NGINX
     server {
-        listen ${PORT} default_server;
+        listen $${PORT} default_server;
         root /var/www/html;
         index index.html;
         location / {
-            try_files \$uri \$uri/ =404;
+            try_files \\$uri \\$uri/ =404;
         }
     }
     NGINX
