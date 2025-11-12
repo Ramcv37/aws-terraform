@@ -13,5 +13,11 @@ module "web" {
 }
 
 output "web_public_ip" {
-  value = module.web.web_public_ip
+  value       = module.web.web_public_ip
+  description = "Public IP address of the web app instance"
+}
+
+output "web_url" {
+  value       = module.web.web_url
+  description = "URL to access the Dell Moogsoft web app"
 }
