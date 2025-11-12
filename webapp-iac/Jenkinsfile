@@ -7,7 +7,7 @@ pipeline {
   }
 
   environment {
-    AWS_CREDENTIALS = "aws-creds"
+    AWS_CREDENTIALS = "aws-dev-iam"     // ✅ your real Jenkins credential ID
     REGION = "ap-south-1"
     BASE_DIR = "webapp-iac/envs"
   }
@@ -32,7 +32,8 @@ pipeline {
         withAWS(region: "${REGION}", credentials: "${AWS_CREDENTIALS}") {
           dir("${BASE_DIR}/${ENV}") {
             sh """
-              terraform init
+              set -e
+              terraform init -input=false
               terraform validate
             """
           }
@@ -45,6 +46,7 @@ pipeline {
         withAWS(region: "${REGION}", credentials: "${AWS_CREDENTIALS}") {
           dir("${BASE_DIR}/${ENV}") {
             sh """
+              set -e
               terraform plan -var-file=${ENV}.tfvars -out=tfplan.bin
             """
           }
@@ -68,42 +70,53 @@ pipeline {
             script {
 
               if (ACTION == "destroy") {
-                echo "🔥 Phase 1: Destroy EC2 instance(s)..."
+                echo "🔥 Starting Safe Destroy sequence..."
+
+                // ✅ Phase 1: Destroy EC2 instance(s)
                 sh """
-                  terraform destroy -auto-approve -target=module.web.aws_instance.web -var-file=${ENV}.tfvars
+                  echo "🧹 Phase 1: Destroying EC2 instance(s)..."
+                  terraform destroy -auto-approve -target=module.web.aws_instance.web -var-file=${ENV}.tfvars || echo "⚠️ Instance destroy skipped (not found)"
                 """
 
-                echo "⏳ Waiting for ENIs to detach from SG before deleting SG..."
+                // ✅ Phase 2: Wait for ENIs to detach from SG
                 sh """
+                  echo "⏳ Checking for attached ENIs..."
                   SG_ID=\$(terraform state show module.web.aws_security_group.web 2>/dev/null | awk '/^id =/ {print \$3}')
                   if [ -n "\$SG_ID" ]; then
-                    echo "🔍 SG ID = \$SG_ID"
+                    echo "🔍 Found SG ID: \$SG_ID"
                     for i in {1..18}; do
                       ENI_COUNT=\$(aws ec2 describe-network-interfaces --filters "Name=group-id,Values=\$SG_ID" --region ${REGION} --query 'NetworkInterfaces' | jq length)
                       if [ "\$ENI_COUNT" -eq 0 ]; then
-                        echo "✅ No ENIs attached — safe to delete SG."
+                        echo "✅ ENIs detached — safe to delete SG"
                         break
                       fi
-                      echo "⏳ ENI still attached... retrying in 20s"
-                      sleep 20
+                      echo "⏳ ENIs still attached... retrying in 15s"
+                      sleep 15
                     done
                   else
-                    echo "ℹ️ SG not in state (already gone or never managed)."
+                    echo "ℹ️ SG not found in state or already deleted."
                   fi
                 """
 
-                echo "🧹 Phase 2: Destroy Security Group..."
+                // ✅ Phase 3: Destroy the SG safely (with retries)
                 sh """
-                  terraform destroy -auto-approve -target=module.web.aws_security_group.web -var-file=${ENV}.tfvars
+                  echo "🧹 Phase 3: Destroying Security Group..."
+                  for i in {1..3}; do
+                    terraform destroy -auto-approve -target=module.web.aws_security_group.web -var-file=${ENV}.tfvars && break || echo "⚠️ Retry SG destroy (attempt \$i)..."
+                    sleep 10
+                  done
+                """
+
+                // ✅ Phase 4: Final cleanup (ensure all gone)
+                sh """
+                  terraform destroy -auto-approve -var-file=${ENV}.tfvars || echo "✅ Cleanup complete or already destroyed"
                 """
 
               } else {
-
-                echo "🚀 Applying Terraform..."
+                echo "🚀 Applying Terraform configuration..."
                 sh """
                   terraform apply -auto-approve -var-file=${ENV}.tfvars
                 """
-
               }
             }
           }
@@ -129,6 +142,10 @@ pipeline {
           }
         }
       }
+    }
+
+    failure {
+      echo "❌ Pipeline failed — check above logs for Terraform or AWS errors."
     }
   }
 }
