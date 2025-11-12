@@ -20,7 +20,7 @@ locals {
 }
 
 # ────────────────────────────────
-# Fetch latest Ubuntu AMI
+# AMI: Ubuntu 22.04 LTS (Jammy)
 # ────────────────────────────────
 data "aws_ami" "ubuntu" {
   most_recent = true
@@ -33,14 +33,14 @@ data "aws_ami" "ubuntu" {
 }
 
 # ────────────────────────────────
-# Security Group
+# Security Group (keep name/desc to avoid replacement)
 # ────────────────────────────────
 resource "aws_security_group" "web" {
   name        = "${local.name_prefix}-web-sg"
-  description = "Allow WebApp Port and SSH"
+  description = "Allow HTTP/SSH"     # keep exactly to avoid replacement
   vpc_id      = var.vpc_id
 
-  # App port (dev/staging can be 808x, prod 80)
+  # App port (e.g., 8080 dev, 80 prod)
   ingress {
     from_port   = var.app_port
     to_port     = var.app_port
@@ -68,7 +68,7 @@ resource "aws_security_group" "web" {
 }
 
 # ────────────────────────────────
-# User data: install nginx + page
+# User data (nginx + landing page)
 # ────────────────────────────────
 locals {
   user_data = <<-EOF
@@ -79,7 +79,7 @@ locals {
     apt-get update -y
     apt-get install -y nginx
 
-    # Write the landing page
+    # Page content
     cat >/var/www/html/index.html <<HTML
     <!DOCTYPE html>
     <html lang="en">
@@ -91,20 +91,20 @@ locals {
                display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }
         .box { text-align:center; background:#13283c; padding:40px 60px; border-radius:16px; box-shadow:0 8px 24px rgba(0,0,0,.4);}
         h1 { font-size:2em; margin-bottom:8px; }
-        span.env { display:inline-block; padding:4px 12px; border-radius:8px; font-weight:bold; background:#0ea5e9; }
+        .pill { display:inline-block; padding:6px 12px; border-radius:999px; font-weight:700; background:#0ea5e9; }
       </style>
     </head>
     <body>
       <div class="box">
         <h1>Welcome Dell Moogsoft</h1>
-        <span class="env">${upper(var.environment)}</span>
+        <div class="pill">${upper(var.environment)}</div>
         <p>Application: ${var.app_name}</p>
       </div>
     </body>
     </html>
     HTML
 
-    # Configure nginx to listen on custom port if not 80
+    # Listen on custom port if not 80
     PORT="${var.app_port}"
     if [ "$PORT" != "80" ]; then
       cat >/etc/nginx/sites-available/webapp <<NGINX
